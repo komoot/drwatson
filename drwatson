@@ -1,0 +1,64 @@
+#!/usr/bin/python3
+
+import boto.ec2
+from collections import defaultdict
+from termcolor import colored
+from boto.vpc import VPCConnection
+
+black_regions = ['us-gov-west-1', 'cn-north-1']
+fail = 0
+
+def reserved_instance_key(instance_type, zone, vpc=None):
+    if instance_type is None:
+        raise ValueError("Missing instance type")
+    if zone is None:
+        raise ValueError("Missing availability zone")
+    if vpc is None:
+        vpc = "vpc" # TODO add a distinction
+    return "%s %s %s" % (instance_type, vpc, zone)
+
+
+def to_string(instance):
+    if 'Name' in instance.tags:
+        return "%s (%s)" % (instance.id, instance.tags['Name'])
+    else:
+        return instance.id
+
+for region in boto.ec2.regions():
+    if region.name in black_regions:
+        continue
+    c = region.connect()
+
+
+    print("Region: " + region.name)
+
+    reserved_instances = defaultdict(int)
+    for ri in c.get_all_reserved_instances():
+        if ri.state == "active":
+            key = reserved_instance_key(ri.instance_type, ri.availability_zone)
+            count = ri.instance_count
+            reserved_instances[key] += count
+
+    instances = c.get_only_instances()
+    instances = sorted(instances, key=lambda x: (x.instance_type, x.placement))
+
+    print("\tAll instances") if len(instances) > 0 else None
+    for instance in instances:
+        key = reserved_instance_key(instance.instance_type, instance.placement)
+        type = "on demand"
+        color = "white"
+        if reserved_instances.get(key, -1) > 0:
+            reserved_instances[key] -= 1
+            type = "reserved"
+            color = "green"
+        print(colored("\t\t%s\t%s\t%s\t%s\t%s" % (instance.instance_type, instance.placement, instance.id, type, to_string(instance)), color))
+
+    print("\tUnused reservations") if len(reserved_instances) > 0 else None
+    for ri, count in reserved_instances.items():
+        if count > 0:
+            print("\t\t%s: %d" % (ri, count))
+            fail += 1
+
+if fail > 0:
+    print("ERR: %d unused reservations", fail)
+    exit(1)
