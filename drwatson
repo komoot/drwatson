@@ -39,7 +39,7 @@ for region in boto.ec2.regions():
             count = ri.instance_count
             reserved_instances[key] += count
 
-    instances = c.get_only_instances()
+    instances = c.get_only_instances(filters={'instance-state-name': 'running'})
     instances = sorted(instances, key=lambda x: (x.instance_type, x.placement))
 
     print("\tAll instances") if len(instances) > 0 else None
@@ -47,7 +47,10 @@ for region in boto.ec2.regions():
         key = reserved_instance_key(instance.instance_type, instance.placement)
         type = "on demand"
         color = "white"
-        if reserved_instances.get(key, -1) > 0:
+        if instance.spot_instance_request_id:
+            type = "spot"
+            color = "blue"
+        elif reserved_instances.get(key, -1) > 0:
             reserved_instances[key] -= 1
             type = "reserved"
             color = "green"
