@@ -1,66 +1,104 @@
 #!/usr/bin/python3
 
-import boto.ec2
+import boto3
+import datetime
 from collections import defaultdict
 from termcolor import colored
-from boto.vpc import VPCConnection
 
-black_regions = ['us-gov-west-1', 'cn-north-1']
+# regions that exist but can't be accessed with normal keys
+regions_blacklist = ['us-gov-west-1', 'cn-north-1']
 fail = 0
 
-def reserved_instance_key(instance_type, zone, vpc=None):
+now = datetime.datetime.utcnow()
+last_hour = now - datetime.timedelta(hours=1)
+
+
+def cpu_utilization(instance_id):
+    response = cloudwatch.get_metric_statistics(Period=3600,
+                                               StartTime=last_hour,
+                                               EndTime=now,
+                                               Namespace='AWS/EC2',
+                                               MetricName='CPUUtilization',
+                                               Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+                                               Statistics=['Average'])
+    if 'Datapoints' in response:
+        if len(response['Datapoints']) > 0:
+            return response['Datapoints'][0]['Average']
+    return None
+
+
+def reserved_instance_key(instance_type, zone=None, vpc=None):
     if instance_type is None:
         raise ValueError("Missing instance type")
     if zone is None:
-        raise ValueError("Missing availability zone")
+        zone = '*'
     if vpc is None:
-        vpc = "vpc" # TODO add a distinction
+        vpc = "vpc"  # TODO add a distinction
     return "%s %s %s" % (instance_type, vpc, zone)
 
 
 def to_string(instance):
-    if 'Name' in instance.tags:
-        return "%s (%s)" % (instance.id, instance.tags['Name'])
+    for tag in instance.tags:
+        if tag['Key'] == 'Name':
+            return "%-20s %s" % (instance.id, tag['Value'])
     else:
         return instance.id
 
-for region in boto.ec2.regions():
-    if region.name in black_regions:
+#
+# Main
+#
+
+ec2client = boto3.client('ec2')
+
+for region in ec2client.describe_regions()['Regions']:
+    if region['RegionName'] in regions_blacklist:
         continue
-    c = region.connect()
 
+    session = boto3.session.Session(region_name=region['RegionName'])
+    ec2 = session.client('ec2')
+    ec2resource = session.resource('ec2')
+    cloudwatch = session.client('cloudwatch')
 
-    print("Region: " + region.name)
+    print("Region: {}".format(session.region_name))
 
     reserved_instances = defaultdict(int)
-    for ri in c.get_all_reserved_instances():
-        if ri.state == "active":
-            key = reserved_instance_key(ri.instance_type, ri.availability_zone)
-            count = ri.instance_count
-            reserved_instances[key] += count
+    for ri in ec2.describe_reserved_instances(Filters=[{'Name': 'state', 'Values': ['active']}])['ReservedInstances']:
+        key = reserved_instance_key(ri['InstanceType'], ri.get('AvailabilityZone'))
+        count = ri['InstanceCount']
+        reserved_instances[key] += count
 
-    instances = c.get_only_instances(filters={'instance-state-name': 'running'})
-    instances = sorted(instances, key=lambda x: (x.instance_type, x.placement))
+    instances = ec2resource.instances.filter(Filters=[{'Name': 'instance-state-name', 'Values': ['running']}])
+    instances = list(instances)
+    if len(instances) > 0:
+        instances.sort(key=lambda x: (x.instance_type, x.placement['AvailabilityZone']))
 
-    print("\tAll instances") if len(instances) > 0 else None
-    for instance in instances:
-        key = reserved_instance_key(instance.instance_type, instance.placement)
-        type = "on demand"
-        color = "white"
-        if instance.spot_instance_request_id:
-            type = "spot"
-            color = "blue"
-        elif reserved_instances.get(key, -1) > 0:
-            reserved_instances[key] -= 1
-            type = "reserved"
-            color = "green"
-        print(colored("\t\t%s\t%s\t%s\t%s\t%s" % (instance.instance_type, instance.placement, instance.id, type, to_string(instance)), color))
+        print("\tAll instances")
+        for instance in instances:
+            cpu = cpu_utilization(instance.id)
+            zone = instance.placement['AvailabilityZone']
+            key = reserved_instance_key(instance.instance_type, zone)
+            keyz = reserved_instance_key(instance.instance_type)
+            type = "on demand"
+            color = "white"
+            if instance.spot_instance_request_id:
+                type = "spot"
+                color = "blue"
+            elif reserved_instances.get(key, -1) > 0:
+                reserved_instances[key] -= 1
+                type = "reserved"
+                color = "green"
+            elif reserved_instances.get(keyz, -1) > 0:
+                reserved_instances[keyz] -= 1
+                type = "reserved*"
+                color = "green"
+            print(colored("\t\t%-10s  %-10s  %-10s  %6.2f  %s" % (instance.instance_type, zone, type, cpu, to_string(instance)), color))
 
-    print("\tUnused reservations") if len(reserved_instances) > 0 else None
-    for ri, count in reserved_instances.items():
-        if count > 0:
-            print("\t\t%s: %d" % (ri, count))
-            fail += 1
+    if len(reserved_instances) > 0:
+        print("\tUnused reservations")
+        for ri, count in reserved_instances.items():
+            if count > 0:
+                print("\t\t%s: %d" % (ri, count))
+                fail += 1
 
 if fail > 0:
     print("ERR: %d unused reservations", fail)
