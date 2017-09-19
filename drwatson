@@ -91,7 +91,7 @@ for region in ec2client.describe_regions()['Regions']:
                 reserved_instances[keyz] -= 1
                 type = "reserved*"
                 color = "green"
-            print(colored("\t\t%-10s  %-10s  %-10s  %6.2f  %s" % (instance.instance_type, zone, type, cpu, to_string(instance)), color))
+            print(colored("\t\t%-10s  %-10s  %-10s  %6.2f  %s" % (instance.instance_type, zone, type, cpu or 0, to_string(instance)), color))
 
     if len(reserved_instances) > 0:
         print("\tUnused reservations")
