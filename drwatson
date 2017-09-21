@@ -38,11 +38,11 @@ def reserved_instance_key(instance_type, zone=None, vpc=None):
 
 
 def to_string(instance):
-    for tag in instance.tags:
-        if tag['Key'] == 'Name':
-            return "%-20s %s" % (instance.id, tag['Value'])
-    else:
-        return instance.id
+    if instance.tags:
+        for tag in instance.tags:
+            if tag['Key'] == 'Name':
+                return "%-20s %s" % (instance.id, tag['Value'])
+    return instance.id
 
 #
 # Main
